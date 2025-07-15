@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::net::TcpListener;
+use std::sync::mpsc;
 
 // Arena Theme Resource
 #[derive(Resource, Debug, Clone)]
@@ -416,6 +417,10 @@ pub struct AgentChat {
     pub auto_chat_enabled: bool,
     pub chat_frequency: f32, // секунды между автоматическими сообщениями
     pub last_chat_time: f32,
+    pub ollama_chat_enabled: bool,
+    pub pending_requests: HashMap<String, String>, // request_id -> context
+    pub chat_receiver: Arc<Mutex<mpsc::Receiver<(String, String)>>>, // (request_id, response)
+    pub chat_sender: Arc<Mutex<mpsc::Sender<(String, String)>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -431,12 +436,17 @@ pub struct ChatMessage {
 
 impl Default for AgentChat {
     fn default() -> Self {
+        let (sender, receiver) = mpsc::channel();
         Self {
             chat_history: Vec::new(),
             window_open: false,
             auto_chat_enabled: true,
             chat_frequency: 10.0, // каждые 10 секунд
             last_chat_time: 0.0,
+            ollama_chat_enabled: true,
+            pending_requests: HashMap::new(),
+            chat_receiver: Arc::new(Mutex::new(receiver)),
+            chat_sender: Arc::new(Mutex::new(sender)),
         }
     }
 }
@@ -1399,6 +1409,46 @@ fn agent_chat_system(
     }
     
     let current_time = time.elapsed_seconds();
+    
+    // Check for received AI messages
+    let mut received_messages = Vec::new();
+    if let Ok(receiver) = agent_chat.chat_receiver.lock() {
+        while let Ok((request_id, response)) = receiver.try_recv() {
+            received_messages.push((request_id, response));
+        }
+    }
+    
+    // Process received messages
+    for (request_id, response) in received_messages {
+        // Find the pending request
+        if let Some(_context) = agent_chat.pending_requests.remove(&request_id) {
+            // Create a new chat message with AI response
+            let parts: Vec<&str> = request_id.split('_').collect();
+            if parts.len() >= 2 {
+                let sender_id = parts[0];
+                
+                // Find the agent
+                for agent in agents_query.iter() {
+                    if agent.id == sender_id {
+                        let ai_message = ChatMessage {
+                            sender_id: agent.id.clone(),
+                            sender_name: agent.name.clone(),
+                            receiver_id: "all".to_string(),
+                            receiver_name: "Arena".to_string(),
+                            message: response.clone(),
+                            timestamp: current_time,
+                            message_type: "ai_generated".to_string(),
+                        };
+                        
+                        agent_chat.chat_history.push(ai_message);
+                        log_system.add_log(format!("🤖 AI: {} says: '{}'", agent.name, response));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
     if current_time - agent_chat.last_chat_time < agent_chat.chat_frequency.max(5.0) { // Минимум 5 секунд между сообщениями
         return;
     }
@@ -1422,20 +1472,78 @@ fn agent_chat_system(
     let receiver = agents[receiver_idx];
     
     // Generate message based on context and AI if available
-    let message = if ollama_connection.connected {
+    let message = if ollama_connection.connected && agent_chat.ollama_chat_enabled {
         // Use Ollama to generate contextual messages
         let context = match (sender.team.as_str(), receiver.team.as_str()) {
             (sender_team, receiver_team) if sender_team == receiver_team => {
-                format!("You are {} from team {}. You're talking to your ally {} from the same team. Generate a short (max 8 words) tactical message about coordinating in battle.", 
+                format!("You are {} from team {}. You're talking to your ally {} from the same team. Generate a short (max 8 words) tactical message about coordinating in battle. Examples: 'Watch my back!', 'Let's coordinate attack!', 'Enemy spotted nearby!'", 
                     sender.name, sender.team, receiver.name)
             }
             (sender_team, receiver_team) => {
-                format!("You are {} from team {}. You're talking to enemy {} from team {}. Generate a short (max 8 words) battle taunt or challenge.", 
+                format!("You are {} from team {}. You're talking to enemy {} from team {}. Generate a short (max 8 words) battle taunt or challenge. Examples: 'You're going down!', 'Prepare for defeat!', 'Face me in combat!'", 
                     sender.name, sender.team, receiver.name, receiver.team)
             }
         };
         
-        // Enhanced templates when Ollama is connected
+        // Try to get AI-generated message
+        let request_id = format!("{}_{}", sender.id, current_time);
+        let request_id_clone = request_id.clone();
+        let context_clone = context.clone();
+        let url = ollama_connection.url.clone();
+        let model = ollama_connection.model.clone();
+        
+        // Get sender channel
+        let sender_clone = if let Ok(sender_channel) = agent_chat.chat_sender.lock() {
+            Some(sender_channel.clone())
+        } else {
+            None
+        };
+        
+        if let Some(sender_channel) = sender_clone {
+            // Send request to background thread
+            thread::spawn(move || {
+                let rt = Runtime::new().unwrap();
+                let result = rt.block_on(async {
+                    let client = Client::new();
+                    let request = OllamaRequest {
+                        model: model,
+                        prompt: context_clone,
+                        stream: false,
+                    };
+                    
+                    let response = client
+                        .post(&format!("{}/api/generate", url))
+                        .json(&request)
+                        .send()
+                        .await;
+                    
+                    match response {
+                        Ok(resp) => {
+                            match resp.json::<OllamaResponse>().await {
+                                Ok(ollama_response) => {
+                                    let clean_response = ollama_response.response.trim().to_string();
+                                    if clean_response.len() > 50 {
+                                        clean_response.chars().take(50).collect::<String>() + "..."
+                                    } else {
+                                        clean_response
+                                    }
+                                }
+                                Err(_) => "Ready for battle!".to_string()
+                            }
+                        }
+                        Err(_) => "Ready for battle!".to_string()
+                    }
+                });
+                
+                // Send result back
+                let _ = sender_channel.send((request_id_clone, result));
+            });
+            
+            // Store pending request
+            agent_chat.pending_requests.insert(request_id, context);
+        }
+        
+        // Use fallback templates while waiting for AI response
         let message_templates = if sender.team == receiver.team {
             // Ally messages - more tactical and coordinated
             vec![
@@ -1764,11 +1872,11 @@ fn create_diverse_agent(
 ) -> Entity {
     // Role-specific material properties
     let (metallic, roughness, emissive) = match role {
-        "warrior" => (0.8, 0.2, Color::BLACK), // Metallic armor
-        "mage" => (0.0, 0.9, Color::rgb(0.1, 0.1, 0.3)), // Magical glow
-        "archer" => (0.2, 0.7, Color::BLACK), // Leather-like
-        "tank" => (0.9, 0.1, Color::BLACK), // Heavy metal
-        "scout" => (0.1, 0.9, Color::BLACK), // Matte finish
+        "warrior" => (0.8, 0.2, Color::rgb(0.1, 0.05, 0.0)), // Metallic armor with orange glow
+        "mage" => (0.0, 0.9, Color::rgb(0.2, 0.1, 0.4)), // Magical purple glow
+        "archer" => (0.2, 0.7, Color::rgb(0.05, 0.1, 0.0)), // Leather-like with green tint
+        "tank" => (0.9, 0.1, Color::rgb(0.1, 0.1, 0.1)), // Heavy metal with gray glow
+        "scout" => (0.1, 0.9, Color::rgb(0.0, 0.1, 0.1)), // Matte finish with blue tint
         _ => (0.1, 0.8, Color::BLACK),
     };
     
@@ -1780,8 +1888,8 @@ fn create_diverse_agent(
         ..default()
     });
     
-    // Role-specific torso dimensions
-    let (torso_width, torso_height, torso_depth) = match role {
+    // Role-specific torso dimensions with slight randomization
+    let base_dimensions = match role {
         "warrior" => (0.5, 0.7, 0.3), // Broader, taller
         "mage" => (0.3, 0.8, 0.2), // Thinner, taller
         "archer" => (0.35, 0.6, 0.2), // Lean build
@@ -1789,6 +1897,14 @@ fn create_diverse_agent(
         "scout" => (0.3, 0.5, 0.2), // Small and agile
         _ => (0.4, 0.6, 0.2),
     };
+    
+    // Add randomization to make each agent unique
+    let randomize = |value: f32| value * (0.9 + rand::random::<f32>() * 0.2);
+    let (torso_width, torso_height, torso_depth) = (
+        randomize(base_dimensions.0),
+        randomize(base_dimensions.1),
+        randomize(base_dimensions.2),
+    );
     
     // Create main entity (torso) - this will be the root node
     let main_entity = commands.spawn((
@@ -1920,14 +2036,14 @@ fn spawn_random_agent(
         decision_cooldown: Timer::from_seconds(2.0, TimerMode::Repeating),
     };
     
-    // Enhanced color system based on team and role
+    // Enhanced color system based on team and role with randomization
     let base_color = match team.as_str() {
-        "red" => Color::rgb(0.8, 0.2, 0.2),
-        "blue" => Color::rgb(0.2, 0.2, 0.8),
-        "green" => Color::rgb(0.2, 0.8, 0.2),
-        "yellow" => Color::rgb(0.8, 0.8, 0.2),
-        "purple" => Color::rgb(0.8, 0.2, 0.8),
-        _ => Color::rgb(0.5, 0.5, 0.5),
+        "red" => Color::rgb(0.7 + rand::random::<f32>() * 0.3, 0.1 + rand::random::<f32>() * 0.2, 0.1 + rand::random::<f32>() * 0.2),
+        "blue" => Color::rgb(0.1 + rand::random::<f32>() * 0.2, 0.1 + rand::random::<f32>() * 0.2, 0.7 + rand::random::<f32>() * 0.3),
+        "green" => Color::rgb(0.1 + rand::random::<f32>() * 0.2, 0.7 + rand::random::<f32>() * 0.3, 0.1 + rand::random::<f32>() * 0.2),
+        "yellow" => Color::rgb(0.7 + rand::random::<f32>() * 0.3, 0.7 + rand::random::<f32>() * 0.3, 0.1 + rand::random::<f32>() * 0.2),
+        "purple" => Color::rgb(0.7 + rand::random::<f32>() * 0.3, 0.1 + rand::random::<f32>() * 0.2, 0.7 + rand::random::<f32>() * 0.3),
+        _ => Color::rgb(0.4 + rand::random::<f32>() * 0.2, 0.4 + rand::random::<f32>() * 0.2, 0.4 + rand::random::<f32>() * 0.2),
     };
     
     // Role-specific color modifications
