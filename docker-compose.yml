@@ -1,0 +1,145 @@
+services:
+  # Игровой движок
+  arena_core:
+    build:
+      context: ./arena_core
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8080"
+      - "8082:8082"
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+    environment:
+      - RUST_LOG=info
+      - LLM_SERVICE_URL=http://llm_service:8000
+      - HEADLESS=1
+      - WEBSOCKET_PORT=8082
+    depends_on:
+      - llm_service
+    networks:
+      - heaven_network
+
+  # LLM сервис
+  llm_service:
+    build:
+      context: ./llm_service
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - TRANSFORMERS_CACHE=/app/models/cache
+      - HF_HOME=/app/models/hf
+      - DATABASE_URL=postgresql://heaven:heaven_pass@postgres:5432/heaven
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    runtime: nvidia  # для GPU поддержки
+    networks:
+      - heaven_network
+
+  # Godot Viewer (Revolutionary 3D Interface)
+  godot_viewer:
+    build:
+      context: ./godot_viewer
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - ARENA_WEBSOCKET_URL=ws://arena_core:8082
+    depends_on:
+      - arena_core
+    networks:
+      - heaven_network
+
+  # Modern React UI
+  web_ui:
+    build:
+      context: ./web_ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_LLM_SERVICE_URL=http://localhost:8000
+      - REACT_APP_ARENA_CORE_URL=http://localhost:8081
+    depends_on:
+      - llm_service
+    networks:
+      - heaven_network
+
+  # No Code UI (Streamlit - для совместимости)
+  nocode_ui:
+    build:
+      context: ./nocode_ui
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+    environment:
+      - LLM_SERVICE_URL=http://llm_service:8000
+      - ARENA_CORE_URL=http://arena_core:8080
+    depends_on:
+      - llm_service
+    networks:
+      - heaven_network
+
+  # Redis для кеширования
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - heaven_network
+
+  # Ollama для локальных LLM моделей
+  ollama:
+    image: ollama/ollama:latest
+    container_name: heaven-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_ORIGINS=*
+    networks:
+      - heaven_network
+    restart: unless-stopped
+
+  # PostgreSQL для хранения результатов
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=heaven
+      - POSTGRES_USER=heaven
+      - POSTGRES_PASSWORD=heaven_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U heaven -d heaven"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - heaven_network
+
+networks:
+  heaven_network:
+    driver: bridge
+
+volumes:
+  redis_data:
+  postgres_data:
+  ollama_data: 

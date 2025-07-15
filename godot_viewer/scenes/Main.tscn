@@ -1,0 +1,136 @@
+[gd_scene load_steps=5 format=3 uid="uid://bg5lkejhm7yxd"]
+
+[ext_resource type="Script" uid="uid://2pu8br03ttkc" path="res://scripts/WebSocketClient.gd" id="1_0hdcp"]
+[ext_resource type="Script" uid="uid://u1brcrtcfh6" path="res://scripts/ArenaRenderer.gd" id="2_4k1mp"]
+[ext_resource type="Script" uid="uid://c5gw5333ldfse" path="res://scripts/UIManager.gd" id="3_ui_manager"]
+
+[sub_resource type="Environment" id="Environment_1hl5s"]
+background_mode = 1
+background_color = Color(0.05, 0.05, 0.15, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.4, 0.4, 0.6, 1)
+ambient_light_energy = 0.3
+
+[node name="Main" type="Node3D"]
+
+[node name="WebSocketClient" type="Node" parent="."]
+script = ExtResource("1_0hdcp")
+
+[node name="ArenaRenderer" type="Node3D" parent="."]
+script = ExtResource("2_4k1mp")
+
+[node name="Environment" type="Node3D" parent="."]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="Environment"]
+environment = SubResource("Environment_1hl5s")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="Environment"]
+transform = Transform3D(0.707107, -0.5, 0.5, 0, 0.707107, 0.707107, -0.707107, -0.5, 0.5, 0, 8, 0)
+shadow_enabled = true
+
+[node name="UIManager" type="Control" parent="."]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("3_ui_manager")
+
+[node name="UI" type="Control" parent="."]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="TopPanel" type="Panel" parent="UI"]
+modulate = Color(0, 0, 0, 0.7)
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_bottom = 60.0
+grow_horizontal = 2
+
+[node name="HBoxContainer" type="HBoxContainer" parent="UI/TopPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 20.0
+offset_top = 10.0
+offset_right = -20.0
+offset_bottom = -10.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Title" type="Label" parent="UI/TopPanel/HBoxContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 24
+text = "🌌 Heaven AI Arena Viewer"
+
+[node name="Spacer" type="Control" parent="UI/TopPanel/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Status" type="Label" parent="UI/TopPanel/HBoxContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0, 1, 0, 1)
+theme_override_font_sizes/font_size = 16
+text = "● Connecting..."
+
+[node name="BottomPanel" type="Panel" parent="UI"]
+modulate = Color(0, 0, 0, 0.7)
+layout_mode = 1
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_top = -60.0
+grow_horizontal = 2
+grow_vertical = 0
+
+[node name="HBoxContainer" type="HBoxContainer" parent="UI/BottomPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 20.0
+offset_top = 10.0
+offset_right = -20.0
+offset_bottom = -10.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="AgentCount" type="Label" parent="UI/BottomPanel/HBoxContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+text = "Agents: 0"
+
+[node name="VSeparator" type="VSeparator" parent="UI/BottomPanel/HBoxContainer"]
+layout_mode = 2
+
+[node name="MatchTime" type="Label" parent="UI/BottomPanel/HBoxContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+text = "Time: 00:00"
+
+[node name="VSeparator2" type="VSeparator" parent="UI/BottomPanel/HBoxContainer"]
+layout_mode = 2
+
+[node name="FPS" type="Label" parent="UI/BottomPanel/HBoxContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+text = "FPS: 60"
+
+[node name="Spacer" type="Control" parent="UI/BottomPanel/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Controls" type="Label" parent="UI/BottomPanel/HBoxContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 12
+text = "Right-click + drag: Rotate camera | Scroll: Zoom"
