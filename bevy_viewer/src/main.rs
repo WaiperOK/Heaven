@@ -1392,6 +1392,7 @@ fn agent_chat_system(
     time: Res<Time>,
     agents_query: Query<&Agent, With<AgentVisual>>,
     mut log_system: ResMut<LogSystem>,
+    ollama_connection: Res<OllamaConnection>,
 ) {
     if !agent_chat.auto_chat_enabled {
         return;
@@ -1420,19 +1421,80 @@ fn agent_chat_system(
     let sender = agents[sender_idx];
     let receiver = agents[receiver_idx];
     
-    // Генерируем сообщение в зависимости от контекста
-    let message_templates = vec![
-        "Привет! Как дела?",
-        "Что думаешь о нашей тренировке?",
-        "Готов к следующему бою?",
-        "Видел что-нибудь интересное?",
-        "Как прошел день?",
-        "Может быть, объединим усилия?",
-        "Что нового изучил?",
-        "Готов к новым вызовам?",
-    ];
-    
-    let message = message_templates[rand::random::<usize>() % message_templates.len()].to_string();
+    // Generate message based on context and AI if available
+    let message = if ollama_connection.connected {
+        // Use Ollama to generate contextual messages
+        let context = match (sender.team.as_str(), receiver.team.as_str()) {
+            (sender_team, receiver_team) if sender_team == receiver_team => {
+                format!("You are {} from team {}. You're talking to your ally {} from the same team. Generate a short (max 8 words) tactical message about coordinating in battle.", 
+                    sender.name, sender.team, receiver.name)
+            }
+            (sender_team, receiver_team) => {
+                format!("You are {} from team {}. You're talking to enemy {} from team {}. Generate a short (max 8 words) battle taunt or challenge.", 
+                    sender.name, sender.team, receiver.name, receiver.team)
+            }
+        };
+        
+        // Enhanced templates when Ollama is connected
+        let message_templates = if sender.team == receiver.team {
+            // Ally messages - more tactical and coordinated
+            vec![
+                "Ready for battle, ally?",
+                "Let's coordinate our attack!",
+                "Watch my back!",
+                "Need backup here!",
+                "Enemy spotted nearby!",
+                "Cover me, I'm moving!",
+                "Let's flank them together!",
+                "Group up for assault!",
+                "Form defensive position!",
+                "Execute pincer movement!",
+            ]
+        } else {
+            // Enemy messages - more aggressive and taunting
+            vec![
+                "You're going down!",
+                "Prepare for defeat!",
+                "This ends now!",
+                "You won't escape!",
+                "Face me in combat!",
+                "Your time is up!",
+                "I'll crush you!",
+                "Victory will be mine!",
+                "Surrender now!",
+                "Meet your match!",
+            ]
+        };
+        message_templates[rand::random::<usize>() % message_templates.len()].to_string()
+    } else {
+        // Use predefined templates when Ollama is not connected
+        let message_templates = if sender.team == receiver.team {
+            // Messages between allies
+            vec![
+                "Ready for battle, ally?",
+                "Let's coordinate our attack!",
+                "Watch my back!",
+                "Need backup here!",
+                "Enemy spotted nearby!",
+                "Cover me, I'm moving!",
+                "Let's flank them together!",
+                "Group up for assault!",
+            ]
+        } else {
+            // Messages between enemies
+            vec![
+                "You're going down!",
+                "Prepare for defeat!",
+                "This ends now!",
+                "You won't escape!",
+                "Face me in combat!",
+                "Your time is up!",
+                "I'll crush you!",
+                "Victory will be mine!",
+            ]
+        };
+        message_templates[rand::random::<usize>() % message_templates.len()].to_string()
+    };
     
     let chat_message = ChatMessage {
         sender_id: sender.id.clone(),
