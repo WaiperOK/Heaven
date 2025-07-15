@@ -766,6 +766,8 @@ fn main() {
         .add_systems(Update, (
             movement_system,
             combat_system,
+            ai_decision_system,
+            agent_respawn_system,
         ))
         .add_systems(Update, (
             prompt_execution_system,
@@ -1948,7 +1950,8 @@ impl AgentIdGenerator {
     }
     
     pub fn generate_random_agent(&mut self) -> (String, String, String, Vec3, String) {
-        let teams = vec!["red", "blue", "green", "yellow", "purple"];
+        // Ограничиваем команды только red и blue для боевых действий
+        let teams = vec!["red", "blue"];
         let roles = vec!["warrior", "scout", "mage", "archer", "tank"];
         
         let team = teams[rand::random::<usize>() % teams.len()];
@@ -2655,10 +2658,12 @@ fn camera_controls(
 }
 
 // AI система принятия решений
+/// AI decision system that makes agents interact intelligently
+/// Agents will find enemies, move towards them, and engage in combat
 fn ai_decision_system(
     time: Res<Time>,
     mut agents: Query<(&mut Agent, &mut AIBrain, &mut Movement, &Transform), With<AgentVisual>>,
-    other_agents: Query<(&Agent, &Transform), (With<AgentVisual>, Without<Movement>)>,
+    arena_state: Res<ArenaState>,
 ) {
     for (mut agent, mut brain, mut movement, transform) in agents.iter_mut() {
         if !agent.ai_enabled {
@@ -2668,23 +2673,93 @@ fn ai_decision_system(
         agent.decision_cooldown.tick(time.delta());
         
         if agent.decision_cooldown.just_finished() && !brain.thinking {
-            // Простая AI логика (будет заменена на Ollama)
-            let decision = simple_ai_decision(&agent, transform, &other_agents);
+            // Enhanced AI logic with team-based interactions using arena_state
+            let decision = simple_ai_decision_from_arena(&agent, transform, &arena_state);
             
             match decision.as_str() {
                 "move_random" => {
                     let target = Vec3::new(
                         (rand::random::<f32>() - 0.5) * 16.0,
-                        0.0,
+                        0.5,
                         (rand::random::<f32>() - 0.5) * 12.0,
                     );
                     movement.target_position = Some(target);
                     agent.status = "moving".to_string();
-                    brain.last_action = "moving to new position".to_string();
+                    brain.last_action = "patrolling area".to_string();
+                }
+                "move_to_enemy" => {
+                    // Find nearest enemy using arena state
+                    let mut nearest_enemy_pos = None;
+                    let mut nearest_distance = f32::MAX;
+                    
+                    for (other_id, other_agent) in &arena_state.agents {
+                        if other_agent.team != agent.team {
+                            let other_position = match other_id.as_str() {
+                                "red_gladiator" => Vec3::new(-5.0, 0.5, 0.0),
+                                "blue_warrior" => Vec3::new(5.0, 0.5, 0.0),
+                                "red_scout" => Vec3::new(0.0, 0.5, 5.0),
+                                _ => Vec3::new(0.0, 0.5, 0.0),
+                            };
+                            let distance = transform.translation.distance(other_position);
+                            if distance < nearest_distance {
+                                nearest_distance = distance;
+                                nearest_enemy_pos = Some(other_position);
+                            }
+                        }
+                    }
+                    
+                    if let Some(enemy_pos) = nearest_enemy_pos {
+                        movement.target_position = Some(enemy_pos);
+                        agent.status = "hunting".to_string();
+                        brain.last_action = "moving towards enemy".to_string();
+                    } else {
+                        // No enemy found, patrol
+                        let target = Vec3::new(
+                            (rand::random::<f32>() - 0.5) * 16.0,
+                            0.5,
+                            (rand::random::<f32>() - 0.5) * 12.0,
+                        );
+                        movement.target_position = Some(target);
+                        agent.status = "searching".to_string();
+                        brain.last_action = "searching for enemies".to_string();
+                    }
+                }
+                "move_to_ally" => {
+                    // Find nearest ally using arena state
+                    let mut nearest_ally_pos = None;
+                    let mut nearest_distance = f32::MAX;
+                    
+                    for (other_id, other_agent) in &arena_state.agents {
+                        if other_agent.team == agent.team && other_agent.id != agent.id {
+                            let other_position = match other_id.as_str() {
+                                "red_gladiator" => Vec3::new(-5.0, 0.5, 0.0),
+                                "blue_warrior" => Vec3::new(5.0, 0.5, 0.0),
+                                "red_scout" => Vec3::new(0.0, 0.5, 5.0),
+                                _ => Vec3::new(0.0, 0.5, 0.0),
+                            };
+                            let distance = transform.translation.distance(other_position);
+                            if distance < nearest_distance {
+                                nearest_distance = distance;
+                                nearest_ally_pos = Some(other_position);
+                            }
+                        }
+                    }
+                    
+                    if let Some(ally_pos) = nearest_ally_pos {
+                        movement.target_position = Some(ally_pos);
+                        agent.status = "regrouping".to_string();
+                        brain.last_action = "moving towards ally".to_string();
+                    } else {
+                        // No ally found, defend in place
+                        movement.target_position = None;
+                        agent.status = "defending".to_string();
+                        brain.last_action = "defending position".to_string();
+                    }
                 }
                 "attack" => {
+                    movement.target_position = None;
                     agent.status = "attacking".to_string();
-                    brain.last_action = "attacking nearby enemy".to_string();
+                    brain.last_action = "engaging enemy".to_string();
                 }
                 "defend" => {
                     movement.target_position = None;
@@ -2696,34 +2771,223 @@ fn ai_decision_system(
                     brain.last_action = "waiting".to_string();
                 }
             }
-            
-            println!("🧠 {} decided: {}", agent.name, brain.last_action);
         }
     }
 }
 
-// Простая AI логика (заглушка для Ollama)
-fn simple_ai_decision(
+/// Simple AI logic that makes agents interact with each other using arena state
+/// Agents will find enemies, move towards them, and engage in combat
+fn simple_ai_decision_from_arena(
     agent: &Agent,
-    _transform: &Transform,
-    _other_agents: &Query<(&Agent, &Transform), (With<AgentVisual>, Without<Movement>)>,
+    transform: &Transform,
+    arena_state: &ArenaState,
 ) -> String {
+    // Find the nearest enemy using arena state
+    let mut nearest_enemy: Option<(f32, Vec3)> = None;
+    let mut nearest_ally: Option<(f32, Vec3)> = None;
+    let mut enemies_found = 0;
+    let mut allies_found = 0;
+    
+    for (other_id, other_agent) in &arena_state.agents {
+        if other_agent.id == agent.id {
+            continue; // Skip self
+        }
+        
+        // For now, we'll use fixed positions since we don't have transform data in arena_state
+        // This is a simplified approach - in practice, you'd want to store positions in arena_state
+        let other_position = match other_id.as_str() {
+            "red_gladiator" => Vec3::new(-5.0, 0.5, 0.0),
+            "blue_warrior" => Vec3::new(5.0, 0.5, 0.0),
+            "red_scout" => Vec3::new(0.0, 0.5, 5.0),
+            _ => Vec3::new(0.0, 0.5, 0.0), // Default position
+        };
+        
+        let distance = transform.translation.distance(other_position);
+        
+        if other_agent.team != agent.team {
+            // Enemy found
+            enemies_found += 1;
+            if let Some((current_dist, _)) = nearest_enemy {
+                if distance < current_dist {
+                    nearest_enemy = Some((distance, other_position));
+                }
+            } else {
+                nearest_enemy = Some((distance, other_position));
+            }
+        } else {
+            // Ally found
+            allies_found += 1;
+            if let Some((current_dist, _)) = nearest_ally {
+                if distance < current_dist {
+                    nearest_ally = Some((distance, other_position));
+                }
+            } else {
+                nearest_ally = Some((distance, other_position));
+            }
+        }
+    }
+    
+    // Decision making based on agent's health and nearby entities
     match agent.health {
         h if h > 70.0 => {
-            if rand::random::<f32>() > 0.5 {
-                "attack".to_string()
+            // High health - be aggressive
+            if let Some((distance, _)) = nearest_enemy {
+                if distance < 5.0 {
+                    println!("🔥 {} ({}): Attacking nearby enemy at distance {:.1} (found {} enemies)", agent.name, agent.team, distance, enemies_found);
+                    "attack".to_string()
+                } else if distance < 10.0 {
+                    println!("🏃 {} ({}): Moving towards enemy at distance {:.1} (found {} enemies)", agent.name, agent.team, distance, enemies_found);
+                    "move_to_enemy".to_string()
+                } else {
+                    println!("🔍 {} ({}): Patrolling for enemies (found {} enemies, closest at {:.1})", agent.name, agent.team, enemies_found, distance);
+                    "move_random".to_string()
+                }
             } else {
+                println!("🚶 {} ({}): No enemies found, patrolling (scanned {} agents)", agent.name, agent.team, enemies_found + allies_found);
                 "move_random".to_string()
             }
         }
         h if h > 30.0 => {
-            if rand::random::<f32>() > 0.7 {
+            // Medium health - be cautious
+            if let Some((distance, _)) = nearest_enemy {
+                if distance < 3.0 {
+                    println!("🔥 {} ({}): Defending against close enemy at distance {:.1}", agent.name, agent.team, distance);
+                    "attack".to_string()
+                } else if distance < 8.0 {
+                    if let Some((ally_distance, _)) = nearest_ally {
+                        if ally_distance < 5.0 {
+                            println!("🏃 {} ({}): Moving towards enemy with ally support", agent.name, agent.team);
+                            "move_to_enemy".to_string()
+                        } else {
+                            println!("🤝 {} ({}): Seeking ally support", agent.name, agent.team);
+                            "move_to_ally".to_string()
+                        }
+                    } else {
+                        println!("🛡️ {} ({}): Taking defensive position", agent.name, agent.team);
+                        "defend".to_string()
+                    }
+                } else {
+                    println!("🔍 {} ({}): Cautiously patrolling", agent.name, agent.team);
+                    "move_random".to_string()
+                }
+            } else {
+                println!("🚶 {} ({}): No enemies found, patrolling cautiously", agent.name, agent.team);
+                "move_random".to_string()
+            }
+        }
+        _ => {
+            // Low health - be defensive
+            if let Some((ally_distance, _)) = nearest_ally {
+                if ally_distance > 3.0 {
+                    println!("🚑 {} ({}): Low health, seeking ally support", agent.name, agent.team);
+                    "move_to_ally".to_string()
+                } else {
+                    println!("🛡️ {} ({}): Low health, defending with ally", agent.name, agent.team);
+                    "defend".to_string()
+                }
+            } else {
+                println!("🛡️ {} ({}): Low health, taking defensive stance", agent.name, agent.team);
                 "defend".to_string()
+            }
+        }
+    }
+}
+
+/// Simple AI logic that makes agents interact with each other
+/// Agents will find enemies, move towards them, and engage in combat
+fn simple_ai_decision(
+    agent: &Agent,
+    transform: &Transform,
+    other_agents: &Query<(&Agent, &Transform), With<AgentVisual>>,
+) -> String {
+    // Find the nearest enemy
+    let mut nearest_enemy: Option<(f32, Vec3)> = None;
+    let mut nearest_ally: Option<(f32, Vec3)> = None;
+    let mut enemies_found = 0;
+    let mut allies_found = 0;
+    
+    for (other_agent, other_transform) in other_agents.iter() {
+        if other_agent.id == agent.id {
+            continue; // Skip self
+        }
+        
+        let distance = transform.translation.distance(other_transform.translation);
+        
+        if other_agent.team != agent.team {
+            // Enemy found
+            enemies_found += 1;
+            if let Some((current_dist, _)) = nearest_enemy {
+                if distance < current_dist {
+                    nearest_enemy = Some((distance, other_transform.translation));
+                }
+            } else {
+                nearest_enemy = Some((distance, other_transform.translation));
+            }
+        } else {
+            // Ally found
+            allies_found += 1;
+            if let Some((current_dist, _)) = nearest_ally {
+                if distance < current_dist {
+                    nearest_ally = Some((distance, other_transform.translation));
+                }
+            } else {
+                nearest_ally = Some((distance, other_transform.translation));
+            }
+        }
+    }
+    
+    // Decision making based on agent's health and nearby entities
+    match agent.health {
+        h if h > 70.0 => {
+            // High health - be aggressive
+            if let Some((distance, _)) = nearest_enemy {
+                if distance < 5.0 {
+                    println!("🔥 {} ({}): Attacking nearby enemy at distance {:.1} (found {} enemies)", agent.name, agent.team, distance, enemies_found);
+                    "attack".to_string()
+                } else if distance < 10.0 {
+                    println!("🏃 {} ({}): Moving towards enemy at distance {:.1} (found {} enemies)", agent.name, agent.team, distance, enemies_found);
+                    "move_to_enemy".to_string()
+                } else {
+                    println!("🔍 {} ({}): Patrolling for enemies (found {} enemies, closest at {:.1})", agent.name, agent.team, enemies_found, distance);
+                    "move_random".to_string()
+                }
+            } else {
+                println!("🚶 {} ({}): No enemies found, patrolling (scanned {} agents)", agent.name, agent.team, enemies_found + allies_found);
+                "move_random".to_string()
+            }
+        }
+        h if h > 30.0 => {
+            // Medium health - be cautious
+            if let Some((distance, _)) = nearest_enemy {
+                if distance < 3.0 {
+                    println!("⚔️ {} ({}): Low health, engaging in close combat", agent.name, agent.team);
+                    "attack".to_string()
+                } else if distance < 8.0 {
+                    println!("🛡️ {} ({}): Medium health, defending position", agent.name, agent.team);
+                    "defend".to_string()
+                } else {
+                    println!("🚶 {} ({}): Medium health, moving carefully", agent.name, agent.team);
+                    "move_random".to_string()
+                }
             } else {
                 "move_random".to_string()
             }
         }
-        _ => "defend".to_string(),
+        _ => {
+            // Low health - be defensive
+            if let Some((ally_distance, _)) = nearest_ally {
+                if ally_distance > 5.0 {
+                    println!("🏥 {} ({}): Low health, retreating to ally", agent.name, agent.team);
+                    "move_to_ally".to_string()
+                } else {
+                    println!("🛡️ {} ({}): Low health, defending near ally", agent.name, agent.team);
+                    "defend".to_string()
+                }
+            } else {
+                println!("🛡️ {} ({}): Low health, no allies found, defending", agent.name, agent.team);
+                "defend".to_string()
+            }
+        }
     }
 }
 
@@ -2817,16 +3081,59 @@ fn combat_system(
     }
     
     // Выполняем атаки и обновляем кулдауны
-    for (attacker_idx, _target_idx, damage, attacker_name, target_name) in attacks_to_perform {
+    for (attacker_idx, target_idx, damage, attacker_name, target_name) in attacks_to_perform {
         let mut agent_data: Vec<_> = agents.iter_mut().collect();
+        
+        // Update attacker's cooldown
         if let Some((_, _, combat)) = agent_data.get_mut(attacker_idx) {
             combat.last_attack_time = current_time;
-            println!("⚔️ {} attacks {} for {} damage!", attacker_name, target_name, damage);
+        }
+        
+        // Damage target
+        if let Some((ref mut target_agent, _, _)) = agent_data.get_mut(target_idx) {
+            target_agent.health -= damage;
+            println!("⚔️ {} attacks {} for {} damage! {} health: {:.1}", 
+                attacker_name, target_name, damage, target_name, target_agent.health);
+            
+            // Check if target is dead
+            if target_agent.health <= 0.0 {
+                println!("💀 {} has been defeated by {}!", target_name, attacker_name);
+                target_agent.health = 0.0;
+                target_agent.status = "dead".to_string();
+                target_agent.ai_enabled = false;
+            }
         }
     }
 }
 
-// Система симуляции тренировки
+/// System to respawn dead agents after a delay
+fn agent_respawn_system(
+    time: Res<Time>,
+    mut agents: Query<(&mut Agent, &mut Transform), With<AgentVisual>>,
+) {
+    for (mut agent, mut transform) in agents.iter_mut() {
+        if agent.status == "dead" && agent.health <= 0.0 {
+            // Respawn after 10 seconds
+            if time.elapsed_seconds() as u32 % 10 == 0 && rand::random::<f32>() < 0.1 {
+                agent.health = 100.0;
+                agent.status = "respawned".to_string();
+                agent.ai_enabled = true;
+                
+                // Respawn at a random position
+                let spawn_pos = Vec3::new(
+                    (rand::random::<f32>() - 0.5) * 14.0,
+                    0.5,
+                    (rand::random::<f32>() - 0.5) * 10.0,
+                );
+                transform.translation = spawn_pos;
+                
+                println!("✨ {} respawned at {:?}", agent.name, spawn_pos);
+            }
+        }
+    }
+}
+
+// Training simulation system
 fn training_simulation_system(
     time: Res<Time>,
     mut training_system: ResMut<TrainingSystem>,
