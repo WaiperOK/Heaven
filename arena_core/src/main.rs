@@ -17,7 +17,7 @@ use game_state::GameStatePlugin;
 use ui::UIPlugin;
 use network::NetworkPlugin;
 use dataset::DatasetPlugin;
-use websocket::{WebSocketServer, ArenaState, AgentData, Position, ArenaStatistics};
+use websocket::WebSocketServer;
 
 // Ресурсы для игрового состояния
 #[derive(Resource)]
@@ -208,7 +208,7 @@ fn handle_input(
 }
 
 fn game_loop(
-    time: Res<Time>,
+    _time: Res<Time>,
     mut match_state: ResMut<MatchState>,
     config: Res<GameConfig>,
 ) {
@@ -280,4 +280,26 @@ fn ui_update(
             ui.label(format!("Макс. агентов: {}", config.max_agents));
             ui.label(format!("Длительность: {}с", config.match_duration.as_secs()));
         });
-} 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GameConfig, MatchState};
+
+    #[test]
+    fn game_config_defaults_are_sane() {
+        let cfg = GameConfig::default();
+        assert!(cfg.arena_size.x > 0.0);
+        assert!(cfg.arena_size.y > 0.0);
+        assert!(cfg.max_agents > 0);
+        assert!(cfg.tick_rate > 0.0);
+    }
+
+    #[test]
+    fn match_state_defaults_to_stopped() {
+        let state = MatchState::default();
+        assert!(!state.is_running);
+        assert!(state.start_time.is_none());
+        assert_eq!(state.current_tick, 0);
+    }
+}
